@@ -1,0 +1,28 @@
+name: Deploy OAuth Proxy Worker
+
+# 只在改动 worker/ 或本文件时触发；也可在 Actions 页面手动 Run workflow。
+on:
+  push:
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # if 表达式里不允许用 secrets 上下文，先转到 env 再判断
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 未配置 Secrets 时跳过，不让仓库里飘红叉
+      - name: Deploy to Cloudflare Workers
+        if: ${{ env.CF_TOKEN != '' && env.CF_ACCOUNT != '' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ env.CF_TOKEN }}
+          accountId: ${{ env.CF_ACCOUNT }}
+          workingDirectory: 'worker'

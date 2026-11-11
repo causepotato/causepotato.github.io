@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Drive - Virtual File System based on GitHub</title>
+    <!-- ★ 静态 <link>，不是 JS 拼出来的。
+         原来是内联脚本 document.write 出这行 —— 浏览器的预加载扫描器
+         只扫 HTML 文本、不执行 JS，看不见它，必须等 HTML 下载完、那段 JS
+         跑完才发起请求，白等一个 RTT。CSS 是渲染阻塞资源，这个 RTT
+         直接压在首屏上。写死之后，扫描器在 HTML 头几个字节就能发现。 -->
+    <link rel="stylesheet" href="css/style.min.css?h=7fd36d31f7" data-gd-css="local">
+    <!-- ★ --stamp 原本写在 css 里，每次 bump 都会改 CSS 内容，导致内容 hash 变化、
+         66KB 的样式表每次升级都要重新下载。移到内联之后：改 JS 不动 CSS，hash 就不变，
+         样式表继续命中缓存。content-hash 已经保证 CSS 不会是旧的，
+         这条戳现在只用于让兼容性自检有值可读。 -->
+    <style>#gd-css-stamp{--stamp:"0.10.4"}</style>
+    <!-- 品牌图标：用真实 PNG 而非 emoji，避免各浏览器字形不一致 -->
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/icon-drive-32.png?v=0.10.4">
+    <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-drive-192.png?v=0.10.4">
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png?v=0.10.4">
+    <!-- ★ 历史版本入口：?version=0.8.8 / ?v= / ?virson=
+         重定向到 versions/<v>/index.html。
+         快照是从仓库历史里抄出来的静态文件，
+         放在本站目录下（同源），不走任何 CDN ——
+         jsDelivr / raw.githubusercontent 在国内时好时坏，
+         靠它们加载旧版本会变成“有时候能开”。
+         白名单冕在页面里，省掉一次为判断版本是否存在而发的请求。 -->
+    <script>
+    (function () {
+        try {
+            var q = new URLSearchParams(location.search);
+            var v = q.get('version') || q.get('v') || q.get('virson');
+            if (!v) return;
+            v = String(v).trim();
+            var LIST = ["0.8.8", "0.8.11", "0.9.0", "0.9.3", "0.9.5", "0.9.7", "0.9.8"];
+            window.GD_HIST_VERSIONS = LIST;
+            if (LIST.indexOf(v) < 0) {
+                alert('\u6ca1\u6709\u8fd9\u4e2a\u5386\u53f2\u7248\u672c\uff1a' + v +
+                      '\n\u53ef\u7528\uff1a' + LIST.join('  '));
+                return;
+            }
+            q.delete('version'); q.delete('v'); q.delete('virson');
+            var rest = q.toString();
+            var base = location.pathname.replace(/\/index\.html?$/i, '').replace(/\/$/, '');
+            location.replace(base + '/versions/' + v + '/index.html' +
+                             (rest ? '?' + rest : '') + location.hash);
+        } catch (e) { }
+    })();
+    </script>
+    <!-- ★ 必须第一个加载：?safe=1 逃生 + 分支名校验要在拼 CDN URL 之前跑完 -->
+    <script src="js/branch-guard.min.js?v=0.10.4"></script>
+    <!-- ★ CORE 静态化 + defer。
+         原来这 15 个是内联 JS 用 document.write 拼 URL 后插入的，
+         扫描器看不见；改成写死后与 CSS 一起被扫描器发现，并行下载。
+         defer 保证：并行下载、不阻塞 HTML 解析、按书写顺序执行
+         （等价原来 document.write 的同步顺序，ui.js 依赖 i18n.js 等
+         跨文件顶层符号，顺序不能乱）。
+         放在 head 里是为了让扫描器尽可能早地撞见它们。 -->
+    <script defer src="js/icons.min.js?h=bde278015a" data-gd-core="icons"></script>
+    <script defer src="js/github-api.min.js?h=820fa1e8a2" data-gd-core="github-api"></script>
+    <script defer src="js/storage.min.js?h=915f127e93" data-gd-core="storage"></script>
+    <script defer src="js/file-manager.min.js?h=402922a169" data-gd-core="file-manager"></script>
+    <script defer src="js/config-sync.min.js?h=d3c84a594e" data-gd-core="config-sync"></script>
+    <script defer src="js/task-dock.min.js?h=0e7dad96ce" data-gd-core="task-dock"></script>
+    <script defer src="js/oauth.min.js?h=0482c94889" data-gd-core="oauth"></script>
+    <script defer src="js/ui.min.js?h=8615d08d33" data-gd-core="ui"></script>
+    <script defer src="js/i18n.min.js?h=de07e71852" data-gd-core="i18n"></script>
+    <script defer src="js/version.min.js?h=b1d28e9dff" data-gd-core="version"></script>
+    <script defer src="js/anim.min.js?h=8db9aa997e" data-gd-core="anim"></script>
+    <script defer src="js/gesture.min.js?h=4896dd831d" data-gd-core="gesture"></script>
+    <script defer src="js/custom.min.js?h=b49d35fe68" data-gd-core="custom"></script>
+    <script defer src="js/theme.min.js?h=b0ec742409" data-gd-core="theme"></script>
+    <script defer src="js/i18n-scan.min.js?h=385acf8972" data-gd-core="i18n-scan"></script>
+    <script defer src="js/onboarding.min.js?h=e2b101055d" data-gd-core="onboarding"></script>
+    <script defer src="js/app.min.js?h=87b3a028e9" data-gd-core="app"></script>
+    <!-- ★ CORE 标签只此一组，由 build.py 按 CORE_FILES 整块重写。
+         oauth 排在 ui 前、onboarding 排在 app 前，顺序由 build.py 保证。
+         community 走 DEFER（登录后才需要），不在这里。 -->
+
+    <script>
+    // 分支切换：检测自定义分支，动态加载资源（使用 jsdelivr CDN 加速）
+    (function() {
+        var customBranch = localStorage.getItem('gd_custom_branch');
+        var urlParams = new URLSearchParams(window.location.search);
+        var urlBranch = urlParams.get('branch');
+
+        // guard 已经处理过 ?safe=1 / ?branch=main / 非法值，
+        // 这里只需在它没动过 localStorage 时才写 URL 参数
+        if (urlBranch && window.BranchGuard && window.BranchGuard.isValidBranch(urlBranch)
+            && urlBranch !== 'main' && !window.BranchGuard.escapeHatchApplied) {
+            customBranch = urlBranch;
+            localStorage.setItem('gd_custom_branch', urlBranch);
+        }
+
+        if (customBranch && customBranch !== 'main') {
+            window.__CUSTOM_BRANCH__ = customBranch;
+            // 使用 jsdelivr CDN，国内访问更快，支持指定分支
+            var baseUrl = 'https://cdn.jsdelivr.net/gh/Cool-zimo/github_drive@' + customBranch + '/';
+            window.__BRANCH_BASE__ = baseUrl;
+            // CSS 从 CDN 加载。本地那份已经由上面的静态 <link> 下载了，
+            // 这里靠层叠顺序（后出现的优先）覆盖它。自定义分支只在开发者
+            // 调试时出现，多下这一份的代价可以接受。
+            document.write('<link rel="stylesheet" href="' + baseUrl + 'css/style.css">');
+        }
+    })();
+    </script>
+</head>
+<body class="gd-logged-out" data-api-v="10">
+    <!-- 登录页 -->
+    <div id="login-screen" class="login-screen">
+        <div class="login-card">
+            <!-- ★ 登录页左栏：产品预览（纯装饰，不参与交互、不发请求）。
+                 原来整屏中间只有一张白卡片 + 一个表单，四周全是空的。
+                 这里放一个"活的"迷你文件管理器：上传进度在走、commit 在滚，
+                 让首屏中间有内容可看，同时把"GitHub 仓库 = 云盘"讲清楚。
+                 aria-hidden：它是装饰，屏幕阅读器只需要读到右边的表单。
+                 中文文案挂 .gd-code（i18n-scan 的保护类），不会被英文界面翻掉；
+                 文件名挂 .file-name，同理不会被当成界面文案翻译。 -->
+            <aside class="login-showcase" aria-hidden="true">
+                <div class="ls-inner">
+                    <div class="ls-top">
+                        <span class="ls-kicker">GITHUB <span class="ls-arrow">→</span> DRIVE</span>
+                        <span class="ls-live"><i></i> SYNCED</span>
+                    </div>
+
+                    <div class="ls-head">
+                        <h2>One repo.<br>One drive.</h2>
+                        <span class="ls-zh gd-code">一个仓库，就是一块云盘</span>
+                    </div>
+
+                    <div class="ls-window">
+                        <div class="ls-winbar">
+                            <span class="ls-dots"><i></i><i></i><i></i></span>
+                            <span class="ls-path">~/drive</span>
+                            <span class="ls-branch">main</span>
+                        </div>
+                        <div class="ls-files">
+                            <div class="ls-row">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2 2 0 0 1 5 5.5h3.6a2 2 0 0 1 1.6.8l1 1.4H19a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                                <span class="ls-name file-name">学习</span><span class="ls-meta">12 items</span>
+                            </div>
+                            <div class="ls-row">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2 2 0 0 1 5 5.5h3.6a2 2 0 0 1 1.6.8l1 1.4H19a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                                <span class="ls-name file-name">python</span><span class="ls-meta">8 items</span>
+                            </div>
+                            <div class="ls-row">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2 2 0 0 1 5 5.5h3.6a2 2 0 0 1 1.6.8l1 1.4H19a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                                <span class="ls-name file-name">BINGBING</span><span class="ls-meta">3 items</span>
+                            </div>
+                            <div class="ls-row">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>
+                                <span class="ls-name file-name">math_history.json</span><span class="ls-meta">32.6 KB</span>
+                            </div>
+                        </div>
+                        <div class="ls-upload">
+                            <div class="ls-upload-txt"><span>uploading 3 files</span><span>in progress</span></div>
+                            <div class="ls-bar"><i></i></div>
+                        </div>
+                        <div class="ls-commit">
+                            <span class="ls-commit-dot"></span>
+                            <code>a1b2c3d</code>
+                            <span>3 files uploaded</span>
+                            <span class="ls-time">just now</span>
+                        </div>
+                    </div>
+
+                    <div class="ls-feats">
+                        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>PRIVATE REPO</span>
+                        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>NO SERVER</span>
+                        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>EXTENSIONS</span>
+                    </div>
+                </div>
+            </aside>
+
+            <div class="login-pane">
+            <div class="login-logo"><img src="assets/icon-drive-192.png?v=0.10.4" alt="GitHub Drive" width="72" height="72"></div>
+            <h1>GitHub Drive</h1>
+            <p class="login-subtitle"><span data-i18n="login.subtitle">Turn your GitHub repo into a private cloud drive</span></p>
+
+            <div class="login-form">
+                <label for="token-input"><span data-i18n="login.tokenLabel">GitHub Personal Access Token</span></label>
+                <div class="gd-token-wrap">
+                    <input type="password" id="token-input" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" spellcheck="false">
+                    <button type="button" class="gd-token-eye" id="token-eye" aria-label="Show/Hide" title="显示/隐藏">
+                        <img class="gd-eye-img" data-state="hidden" src="assets/eye.png" alt="显示" width="18" height="18">
+                        <img class="gd-eye-img" data-state="shown" src="assets/eye-off.png" alt="隐藏" width="18" height="18" hidden>
+                    </button>
+                </div>
+                <p class="token-hint"><span data-i18n="login.tokenHint">需要</span> <code>repo</code> <span data-i18n="login.and">和</span> <code>workflow</code> <span data-i18n="login.permission">权限</span></p>
+                <button id="enter-drive-btn" type="button"><span data-i18n="login.enter">Enter Drive</span></button>
+
+                <!-- GitHub 登录（OAuth Device Flow）。
+                     默认隐藏：只有代理和 client_id 都配对、且代理能连通时才显示，
+                     否则老老实实用上面的 PAT 输入框。 -->
+                <button id="oauth-login-btn" type="button" class="gd-oauth-btn" style="display:none">
+                    <svg class="gd-oauth-mark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+                    <span data-i18n="login.oauthSignIn">用 GitHub 账号登录</span>
+                </button>
+
+                <div id="oauth-panel" class="gd-oauth-panel" style="display:none">
+                    <div class="gd-oauth-title" data-i18n="login.oauthTitle">在 GitHub 上完成授权</div>
+                    <div class="gd-oauth-step" data-i18n="login.oauthStep">在打开的页面里输入下面这个码，然后点授权</div>
+                    <div class="gd-oauth-code" id="oauth-code" role="button" tabindex="0" title="点击复制">--------</div>
+                    <button id="oauth-open-btn" type="button" class="gd-oauth-open">
+                        <span data-i18n="login.oauthOpen">打开 GitHub 授权页（已自动复制）</span>
+                    </button>
+                    <div class="gd-oauth-status">
+                        <span class="gd-oauth-spinner" aria-hidden="true"></span>
+                        <span data-i18n="login.oauthWaiting">等待你在 GitHub 上完成授权…</span>
+                        <span id="oauth-countdown" class="gd-oauth-countdown"></span>
+                    </div>
+                    <button id="oauth-cancel-btn" type="button" class="gd-oauth-cancel">
+                        <span data-i18n="login.oauthCancel">取消</span>
+                    </button>
+                </div>
+                <!-- 快捷登录诊断区。默认隐藏，只在代理探测失败时出现。
+                     存在的理由：移动端没有 F12，控制台日志看不到，排障只能靠猜。
+                     内容由 js/ui.js 的 _renderOAuthDiag 动态填充。 -->
+                <div id="oauth-diag" class="gd-oauth-diag" style="display:none"></div>
+                <div id="saved-accounts" class="saved-accounts" style="display:none;margin:16px 0;">
+                    <div class="saved-accounts-title" style="font-size:12px;color:#6b7280;margin-bottom:8px;text-align:center;"><span data-i18n="login.savedAccounts">已保存的账号</span></div>
+                    <div id="accounts-list" class="accounts-list"></div>
+                    <div class="login-divider" style="margin:16px 0;"><span data-i18n="login.or">OR</span></div>
+                </div>
+                <div id="bridge-box" class="bridge-box" style="display:none">
+                    <div class="bridge-title"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.8 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.8-1.7"/></svg> <span data-i18n="bridge.detected">检测到仓鼠已登录</span></div>
+                    <div id="bridge-info" class="bridge-info">
+                        <span id="bridge-who"></span>
+                        <span class="bridge-note" data-i18n="bridge.note">仓鼠 · 令牌只在你本机浏览器里，不会上传</span>
+                    </div>
+                    <button id="bridge-btn" class="bridge-btn" type="button"><span data-i18n="bridge.useIt">沿用该账号，免输入进入</span></button>
+                </div>
+                <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=GitHub+Drive" target="_blank" class="token-link"><span data-i18n="login.noToken">No Token? Click here to create →</span></a>
+            </div>
+            <div class="login-version" id="login-version" style="text-align:center;margin-top:16px;font-size:12px;color:#6b7280;">
+                加载版本中...
+            </div>
+            </div><!-- /login-pane -->
+        </div>
+    </div>
+    <script>
+    // 与仓鼠联动：对方已登录则显示"沿用账号"
+    //
+    // ⚠ 必须等 Bridge 就绪再执行。
+    // 这段原本是立即执行函数，但它在 document.write 加载 bridge.js
+    // 之前就跑了 —— window.Bridge 恒为 undefined，直接 return，
+    // 于是"沿用账号"的提示框从来没显示过。
+    // 桥接脚本是同步 document.write 加载的，DOMContentLoaded 时必然已就绪。
+    (function() {
+        function setup() {
+            // ★ 默认不显示仓鼠联动（用户要求）。
+            //   只有当设置里明确打开时才启用 —— 存 gd_bridge_enabled === '1'。
+            //   没开就直接返回，连 Bridge 都不去碰。
+            try {
+                if (localStorage.getItem('gd_bridge_enabled') !== '1') return;
+            } catch (e) { return; }
+            var B = window.Bridge;
+            if (!B || !B.other || !B.other() || !B.otherHasToken()) return;
+            var box = document.getElementById('bridge-box');
+            if (box) box.style.display = '';
+            var u = B.findUser(), o = B.other();
+            // 只填账号名那一段。
+            // 说明文字留给静态的 data-i18n 元素 —— 这样切语言时
+            // I18n.apply() 能一并重翻；若由 JS 写入，
+            // apply() 只重翻 data-i18n，这段就会留在旧语言上。
+            var who = document.getElementById('bridge-who');
+            if (who) {
+                who.innerHTML = o.icon + ' <strong>' +
+                    esc(u && u.login ? u.login : '已登录账号') + '</strong>';
+            }
+            var btn = document.getElementById('bridge-btn');
+            if (btn) btn.addEventListener('click', function() {
+                var t = B.findToken();
+                if (!t) return;
+                var inp = document.getElementById('token-input');
+                if (inp) inp.value = t;
+                document.getElementById('enter-drive-btn')?.click();
+            });
+        }
+        // 账号名来自 localStorage，理论上可信，但仍转义，避免存储被污染时 XSS
+        function esc(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', setup);
+        } else {
+            setup();
+        }
+    })();
+    </script>
+    <script>
+    /* ★ 链接直登：github_drive/?with_token=ghp_xxx
+       —— 分享/书签里带 token，点开就进 Drive，不用手敲。
+       做法是填进输入框再触发已有的"进入 Drive"按钮，完全复用现有登录流程
+       （校验、存账号、切视图），不另起一套，避免两条路径行为不一致。
+       ★ 用完后立刻把 token 从地址栏抹掉：否则它会留在历史记录、
+         被人从背后看到、或随"复制网址"一起泄露出去。 */
+    (function() {
+        var m = location.search.match(/[?&]with_token=([^&]+)/);
+        if (!m) return;
+        var tok = decodeURIComponent(m[1]);
+        function fill() {
+            var inp = document.getElementById('token-input');
+            var btn = document.getElementById('enter-drive-btn');
+            if (!inp || !btn) return false;
+            inp.value = tok;
+            btn.click();
+            return true;
+        }
+        function scrub() {
+            // 只删 with_token 这一个参数，其余（如 file=）保留
+            var q = location.search.replace(/[?&]with_token=[^&]*/, '');
+            if (q && q[0] !== '?') q = '?' + q.slice(1);
+            if (q === '?') q = '';
+            try { history.replaceState(null, '', location.pathname + q + location.hash); } catch (e) {}
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', function() { fill(); });
+        } else {
+            fill();
+        }
+        window.addEventListener('load', scrub);
+        setTimeout(scrub, 1500);   // 兜底：load 没触发也要抹掉
+    })();
+    </script>
+    <script>
+    // 令牌显示/隐藏
+    (function() {
+        var eye = document.getElementById('token-eye');
+        var inp = document.getElementById('token-input');
+        if (!eye || !inp) return;
+        eye.addEventListener('click', function() {
+            var show = inp.type === 'password';
+            inp.type = show ? 'text' : 'password';
+            // 两张图都在 DOM 里，只切 hidden —— 不用等图片加载，也不会闪
+            var imgs = eye.querySelectorAll('.gd-eye-img');
+            for (var k = 0; k < imgs.length; k++) {
+                imgs[k].hidden = ((imgs[k].getAttribute('data-state') === 'shown') !== show);
+            }
+            eye.setAttribute('aria-pressed', show ? 'true' : 'false');
+            // 切完把光标放回末尾，否则会从开头输入
+            try { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } catch (e) {}
+        });
+    })();
+    </script>
+    <script>
+    // 登录页显示版本号
+    (function() {
+        fetch('js/version.js?t=' + Date.now())
+            .then(r => r.text())
+            .then(t => {
+                const m = t.match(/VERSION\s*=\s*['"]([^'"]+)['"]/);
+                const m2 = t.match(/version\s*[:=]\s*['"]([^'"]+)['"]/i);
+                const v = m ? m[1] : (m2 ? m2[1] : 'v-');
+                document.getElementById('login-version').textContent = 'GitHub Drive ' + v;
+            })
+            .catch(() => {
+                document.getElementById('login-version').textContent = 'GitHub Drive';
+            });
+    })();
+    </script>
+
+    <!-- 主应用 -->
+    <div id="app" class="app hidden">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <span class="sidebar-logo"><img src="assets/icon-drive-192.png?v=0.10.4" alt="" width="24" height="24"></span>
+                <span class="sidebar-title">GitHub Drive</span>
+            </div>
+            <nav class="sidebar-nav">
+                <!-- 我的文件 -->
+                <div class="nav-section">
+                    <div class="nav-section-title"><span data-i18n="sidebar.myFiles">My Files</span></div>
+                    <a href="#" class="nav-item" id="dashboard-nav" data-view="dashboard"><span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/><line x1="3" y1="21" x2="21" y2="21"/></svg></span><span>仪表盘</span></a>
+                    <a href="#" class="nav-item active" data-view="all-files">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
+                        <span data-i18n="nav.allFiles">全部文件</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="recent">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+                        <span data-i18n="nav.recent">最近使用</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="starred">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+                        <span data-i18n="nav.starred">收藏</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="trash">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span>
+                        <span data-i18n="nav.trash">回收站</span>
+                    </a>
+                </div>
+
+                <!-- 分享（平铺：和其他分组保持一致，不再折叠） -->
+                <div class="nav-section">
+                    <div class="nav-section-title"><span>分享</span></div>
+                    <a href="#" class="nav-item" data-view="shared">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></span>
+                        <span data-i18n="nav.shared">我的分享</span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="explore">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
+                        <span data-i18n="nav.explore">发现分享</span>
+                    </a>
+                    <!-- 千览：独立的阅读器页面。
+                         用 target="_blank" 打开新标签而不是切视图 —— 它有自己的
+                         一套状态（当前文件、滚动位置），嵌进 Drive 的视图体系里
+                         反而会和文件列表互相干扰。相对路径能自动适配 Pages 子路径。 -->
+                    <a href="thousand-preview/" class="nav-item" id="thousand-nav"
+                       target="_blank" rel="noopener" title="用阅读器打开文件，自动记住读到哪">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 4h7l2 2h11v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"/><path d="M8 13h8M8 17h5"/></svg></span>
+                        <span data-i18n="nav.thousand">千览</span>
+                    </a>
+                    <script>
+                    /* ★ URL 直登：github_drive/?with_token=ghp_xxx
+                       同时支持 #with_token=xxx（hash 不会发给服务器，
+                       分享链接时 token 不会出现在任何日志里，更安全）。
+                       app 是异步构造的，这里轮询等它出现再触发登录，
+                       并把 token 从地址栏抹掉，避免被复制/留存。 */
+                    (function () {
+                        var p = new URLSearchParams(location.search);
+                        var t = p.get('with_token') ||
+                                (location.hash.match(/with_token=([^&]+)/) || [])[1] || '';
+                        t = (t || '').trim();
+                        if (!t) return;
+                        try { t = decodeURIComponent(t); } catch (e) {}
+                        if (!/^(ghp_|gho_|github_pat_)/.test(t)) return;
+
+                        // 只跑一次：登录失败也不该无限重试
+                        var flag = 'gd_url_token_used_' + t.slice(-6);
+                        if (sessionStorage.getItem(flag)) return;
+                        sessionStorage.setItem(flag, '1');
+
+                        var n = 0;
+                        var timer = setInterval(function () {
+                            n++;
+                            var app = window.app || window.ui && window.ui.app;
+                            if ((!app || typeof app.login !== 'function') && n < 100) return;
+                            clearInterval(timer);
+                            if (!app || typeof app.login !== 'function') return;
+                            var box = document.getElementById('token-input') ||
+                                      document.querySelector('input[type=password]');
+                            if (box) box.value = t;
+                            // 换号才重载：已经登着 A，用 with_token 直登 B 时，
+                            // 页面里还挂着 A 的文件树 / VFS / 面包屑，就地切会留下
+                            // 一串 A 的残留视图。重载一次最干净。
+                            // 本来就是 B（或没登录）则不动，避免白闪一下。
+                            var prev = '';
+                            try {
+                                var st0 = (typeof Storage !== 'undefined') ? new Storage() : null;
+                                var u0 = st0 && st0.getUser ? st0.getUser() : null;
+                                prev = (u0 && (u0.login || '')) || '';
+                            } catch (e) { prev = ''; }
+                            app.login(t).then(function () {
+                                // 抹掉地址栏里的 token（先抹，重载也不会再带）
+                                history.replaceState(null, '',
+                                    location.pathname + (location.search
+                                        .replace(/[?&]with_token=[^&]*/g, '')
+                                        .replace(/^&/, '?') || ''));
+                                var now = '';
+                                try {
+                                    var st1 = (typeof Storage !== 'undefined') ? new Storage() : null;
+                                    var u1 = st1 && st1.getUser ? st1.getUser() : null;
+                                    now = (u1 && (u1.login || '')) || '';
+                                } catch (e) { now = ''; }
+                                if (prev && now && prev.toLowerCase() !== now.toLowerCase()) {
+                                    location.reload();
+                                }
+                            }).catch(function () {});
+                        }, 100);
+                    })();
+                    </script>
+                    <script>
+                    /* ★ 用本地已存账号进入：github_drive/?user=Cool-zimo
+                       账号的 token 本来就存在本机 localStorage 里，链接里不带任何
+                       凭据 —— 只是指定"用哪个已登录过的号"，比 with_token 安全得多。
+                       匹配 login（大小写不敏感）或 id，命中后切成当前账号再重载一次，
+                       让 app 用新 token 正常初始化。同样支持 #user=xxx。 */
+                    (function () {
+                        var p = new URLSearchParams(location.search);
+                        var u = p.get('user') ||
+                                (location.hash.match(/[?&]user=([^&]+)/) || [])[1] || '';
+                        u = (u || '').trim();
+                        if (!u) return;
+                        try { u = decodeURIComponent(u); } catch (e) {}
+
+                        var flag = 'gd_url_user_used_' + u.toLowerCase();
+                        if (sessionStorage.getItem(flag)) return;
+                        sessionStorage.setItem(flag, '1');
+
+                        // ★ Storage 类在 js/storage.js 里，defer 脚本要等文档解析完
+                        //   才执行。这段内联脚本跑得比它早，直接 new 会 ReferenceError，
+                        //   所以轮询等它出现（最多 5 秒）。
+                        var n = 0;
+                        var timer = setInterval(function () {
+                            n++;
+                            if (typeof Storage === 'undefined' && n < 50) return;
+                            clearInterval(timer);
+                            if (typeof Storage === 'undefined') return;
+                            var hit;
+                            try {
+                                var st = new Storage();
+                                var want = u.toLowerCase();
+                                hit = (st.getAccounts() || []).find(function (a) {
+                                    var login = ((a.user && (a.user.login || a.user.name)) || '').toLowerCase();
+                                    return login === want || String(a.id).toLowerCase() === want;
+                                });
+                                if (hit) st.setCurrentAccount(hit.id);
+                            } catch (e) { return; }
+
+                            if (!hit) {
+                                alert('本机没有保存 ' + u + ' 这个账号，请先登录一次再用这个链接。');
+                                return;
+                            }
+                            // 重载一次让 app 用新 token 初始化；参数已消费，去掉避免再次触发
+                            var q = location.search.replace(/[?&]user=[^&]*/g, '')
+                                        .replace(/^&/, '?');
+                            location.replace(location.pathname +
+                                (q && q !== '?' ? q : '') + location.hash);
+                        }, 100);
+                    })();
+                    </script>
+                    <script>
+                    /* ★ 相对路径在无尾斜杠的 URL 下会解析到根域：
+                         /github_drive  + "thousand-preview/" → /thousand-preview/（404）
+                       你的地址栏正是 /github_drive（无尾斜杠），所以点千览等于跳到
+                       一个不存在的地址 —— 表现就是"没反应"。这里按实际路径算出
+                       项目根再拼，同时也给预览逻辑用（window.GD_TP_URL）。 */
+                    (function () {
+                        var a = document.getElementById('thousand-nav');
+                        var dir = location.pathname.replace(/\/$/, '');
+                        var m = dir.match(/^(.*)\/github_drive$/i);
+                        var root = m ? (m[1] || '') + '/github_drive'
+                                     : dir.replace(/\/[^/]*$/, '');
+                        var url = root + '/thousand-preview/';
+                        window.GD_TP_URL = url;
+                        if (a) a.href = url;
+                    })();
+                    </script>
+                </div>
+
+                <!-- 后台进程：统一管理所有进度任务 -->
+                <div class="nav-section">
+                    <div class="nav-section-title"><span>任务</span></div>
+                    <a href="#" class="nav-item" id="tasks-nav" data-view="tasks" onclick="ui.showTaskManager();return false;">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></span>
+                        <span>后台进程</span>
+                        <span class="nav-badge" id="nav-badge-tasks" style="display:none;"></span>
+                    </a>
+                    <a href="#" class="nav-item" data-view="plugins" id="plugins-nav">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 3a2 2 0 0 1 4 0v1h3a2 2 0 0 1 2 2v3h1a2 2 0 0 1 0 4h-1v3a2 2 0 0 1-2 2h-3v-1a2 2 0 0 0-4 0v1H7a2 2 0 0 1-2-2v-3H4a2 2 0 0 1 0-4h1V6a2 2 0 0 1 2-2h3z"/></svg></span>
+                        <span data-i18n="nav.plugins">插件广场</span>
+                    </a>
+                </div>
+
+                <!-- 扩展：入口直接放在主侧边栏里，不再另起一条右侧活动栏 -->
+                <div class="nav-section" id="gd-ext-nav-section">
+                    <div class="nav-section-title"><span>扩展</span>
+                        <button class="gd-ext-nav-manage" id="gd-ext-nav-manage" title="打开插件广场">管理</button>
+                    </div>
+                    <div id="gd-ext-activity" class="gd-ext-activity gd-ext-nav-list"></div>
+                </div>
+
+                <!-- 社区：聊天室走侧边栏（高频入口，天天来） -->
+                <div class="nav-section">
+                    <div class="nav-section-title"><span>社区</span></div>
+                    <a href="#" class="nav-item" data-view="chat" id="chat-nav">
+                        <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></span>
+                        <span>公共聊天室</span>
+                    </a>
+                </div>
+
+            </nav>
+            <!-- 侧栏视图容器：默认不用。点扩展一律开独立窗口，
+                 仅扩展主动调用 GD.ui.sidebarShow() 时才显示 -->
+            <div id="gd-ext-panel" class="gd-ext-view" hidden>
+                <div class="gd-ext-view-head">
+                    <button id="gd-ext-view-back" class="gd-ext-view-btn" title="返回文件导航">←</button>
+                    <span id="gd-ext-panel-title"></span>
+                    <button id="gd-ext-view-window" class="gd-ext-view-btn" title="在独立窗口打开">⧉</button>
+                    <button id="gd-ext-panel-close" class="gd-ext-view-btn" title="收起">✕</button>
+                </div>
+                <div id="gd-ext-panel-body"></div>
+            </div>
+            <div class="sidebar-footer">
+                <div class="app-switch-slot" id="app-switch-slot"></div>
+                <div class="user-info" id="user-info" onclick="ui.showAccountSwitcher()" style="cursor:pointer;" title="点击切换账号"></div>
+                <button onclick="ui.showSettings()" style="width:100%;padding:10px 16px;border:none;background:none;cursor:pointer;color:inherit;font-size:13px;text-align:left;display:flex;align-items:center;gap:8px;border-top:1px solid #e5e7eb;">
+                    <span class="nav-icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span><span data-i18n="nav.settings">Settings</span>
+                </button>
+                <!-- 隐藏元素，保留ID供JS引用 -->
+                <span id="repo-size-display" style="display:none;"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.3 7 12 12 20.7 7"/><polyline points="12 22 12 12"/></svg> --</span>
+                <span class="app-version" id="app-version" style="display:none;">v-</span>
+            </div>
+        </aside>
+        <div class="sidebar-resizer" id="sidebar-resizer" title="拖动调整侧边栏宽度"></div>
+        <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 顶部工具栏 -->
+            <header class="toolbar">
+                <button class="menu-toggle" id="menu-toggle" aria-label="Menu"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+                <div class="breadcrumb" id="breadcrumb"></div>
+                <div class="toolbar-actions">
+                    <div class="search-box" id="gd-search-box">
+                        <input type="text" id="search-input" placeholder="Search files..." autocomplete="off">
+                        <button class="gd-search-mode" id="gd-search-mode" type="button" title="切换搜索范围">文件 ⌄</button>
+                        <div class="gd-search-options" id="gd-search-options" hidden>
+                            <button type="button" data-mode="files" class="active">🔍 搜文件</button>
+                            <button type="button" data-mode="commands">⌘ 搜命令</button>
+                        </div>
+                        <div class="gd-search-results" id="gd-search-results" hidden></div>
+                    </div>
+                    <button class="btn-secondary" id="adv-search-btn" title="高级筛选"><span><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.8 1.1V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.1-2.8H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 2.6 7a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H7a1.7 1.7 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.8 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V7a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></span></button>
+                    <button class="btn-secondary" id="folder-tree-btn" title="文件夹导航"><span><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></span></button>
+                    <button class="btn-secondary" id="new-folder-btn" title="New Folder">
+                        <span><svg class="ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><path d="M2 14l3.5-5.5a2 2 0 0 1 1.7-.9h13.6a1 1 0 0 1 .85 1.5L18 15"/></svg></span> <span class="btn-text"><span data-i18n="btn.newFolder">New Folder</span></span>
+                    </button>
+                    <button class="btn-secondary" id="upload-btn" title="Upload files/folders">
+                        <span><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span> <span class="btn-text"><span data-i18n="btn.upload">Upload</span></span>
+                    </button>
+                    <button class="btn-secondary" id="view-toggle-btn" title="Toggle view (grid/list)">
+                        <span id="view-toggle-icon"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></span>
+                    </button>
+                </div>
+            </header>
+
+            <!-- 文件列表 -->
+            <div class="file-area">
+                <div id="drop-overlay" class="drop-overlay hidden">
+                    <div class="drop-content">
+                        <div class="drop-icon"><svg class="ico" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
+                        <p>松开鼠标<span data-i18n="btn.upload">Upload</span>文件</p>
+                    </div>
+                </div>
+                <div id="file-list" class="file-list"></div>
+                <div id="empty-state" class="empty-state hidden">
+                    <div class="empty-icon"><svg class="ico" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+                    <p><span data-i18n="empty.noFiles">No files here yet</span></p>
+                    <p class="empty-hint"><span data-i18n="empty.dragHint">Drag files here, or click "Upload" button above</span></p>
+                </div>
+                <div id="loading-state" class="loading-state hidden">
+                    <div class="spinner"></div>
+                    <p>加载中...</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- 右键菜单 -->
+        <div id="context-menu" class="context-menu hidden">
+            <div class="context-menu-item" data-action="open"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> <span data-i18n="menu.open">Open</span></div>
+            <div class="context-menu-item" data-action="download"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> <span data-i18n="menu.download">Download</span></div>
+            <div class="context-menu-item" data-action="share"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.8 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.8-1.7"/></svg> <span data-i18n="menu.share">Share</span></div>
+            <div class="context-menu-item" data-action="edit"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> 编辑文件</div>
+            <div class="context-menu-item" data-action="history"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> 版本历史</div>
+            <div class="context-menu-item" data-action="tags"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.6 13.4 12 22l-9-9V3h10z"/><line x1="7.5" y1="7.5" x2="7.51" y2="7.5"/></svg> 标签管理</div>
+            <div class="context-menu-item" data-action="rename"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> <span data-i18n="menu.rename">Rename</span></div>
+            <div class="context-menu-item" data-action="move"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg> <span data-i18n="menu.move">Move to...</span></div>
+            <div class="context-menu-item" data-action="copy"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> <span data-i18n="menu.copy">Copy</span></div>
+            <div class="context-menu-item" data-action="star"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg> <span data-i18n="menu.star">Star</span></div>
+            <div class="context-menu-divider"></div>
+            <div class="context-menu-item danger" data-action="delete"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> <span data-i18n="menu.delete">Delete</span></div>
+        </div>
+    </div>
+
+    <!-- 模态框容器 -->
+    <div id="modal-container"></div>
+
+    <!-- 扩展宿主 v2：状态栏 / 域名授权框；扩展列表与视图都在主侧边栏内 -->
+    <div id="gd-ext-statusbar" class="gd-ext-statusbar" hidden></div>
+    <div id="gd-ext-grant-layer" class="gd-ext-grant-layer" hidden></div>
+
+    <!-- Toast 通知 -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- 隐藏的文件输入 -->
+    <input type="file" id="file-input" multiple class="hidden">
+    <input type="file" id="folder-input" webkitdirectory directory multiple class="hidden">
+
+    <script>
+    // 根据分支动态加载 JS
+    //
+    // ★ 分两组：
+    //   CORE   —— 首屏（登录页）就需要的，同步加载。
+    //   DEFER  —— 只有登录后才用得到，等验证完 token 再加载，
+    //             让"打开页面到能点登录"这段时间尽量短。
+    //             登录本身要发请求验证 token，那点时间足够把这几个拉下来。
+    (function() {
+        var base = window.__BRANCH_BASE__ || '';
+
+        // ── OAuth Device Flow 默认配置 ──────────────────────
+        // Device Flow 不需要 secret，client_id 前端本来就得公开，写在页面里没问题。
+        // localStorage 里的值优先级更高，方便 fork 之后换成自己的：
+        //   localStorage.setItem('gd_oauth_proxy', 'https://xxx.workers.dev')
+        //   localStorage.setItem('gd_oauth_client_id', 'Ov23.xxxx')
+        // 国内网络访问不到 workers.dev（已实测：换名、换前缀均超时）。
+        // 已申请免费域名 fengzimo.eu.org（nic.eu.org 人工审核中），
+        // 审核通过后把 Worker 绑到自定义域（例如 https://gh.fengzimo.eu.org），
+        // 填进下面这行即可启用；现在留空 = 关闭按钮，回到 PAT 登录。
+        window.GD_OAUTH_PROXY = '';
+        window.GD_OAUTH_CLIENT_ID = 'Ov23liuMyWPhGbmCEqDS';
+
+        var CORE = ['icons', 'github-api', 'storage', 'file-manager', 'config-sync', 'task-dock', 'oauth', 'ui', 'i18n', 'version', 'anim', 'gesture', 'custom', 'theme', 'i18n-scan', 'onboarding', 'app'];
+        var DEFER = ['bridge', 'cangshu-link', 'maintain', 'share', 'plugin-api', 'ext-host', 'ban-sync', 'community'];
+        // ★ 由 build.py 生成：每个文件的内容 hash。
+        //   改哪个文件，只有那个文件的 URL 变，其余继续命中缓存。
+        var GD_HASH = {
+            'anim': '8db9aa997e',
+            'app': '87b3a028e9',
+            'ban-sync': 'db6d16cac9',
+            'branch-guard': '2a17031683',
+            'bridge': '5cd1cbc1ce',
+            'cangshu-link': 'd87df4f3cb',
+            'community': 'c27d585a8c',
+            'config-sync': 'd3c84a594e',
+            'custom': 'b49d35fe68',
+            'ext-host': '137a9db724',
+            'ext-sdk': 'cdce641284',
+            'extension': 'ac2832ce10',
+            'file-manager': '402922a169',
+            'gesture': '4896dd831d',
+            'github-api': '820fa1e8a2',
+            'i18n': 'de07e71852',
+            'i18n-scan': '385acf8972',
+            'icons': 'bde278015a',
+            'maintain': 'b10def0baf',
+            'oauth': '0482c94889',
+            'onboarding': 'e2b101055d',
+            'plugin-api': 'c3c2940bd5',
+            'share': '4504069936',
+            'storage': '915f127e93',
+            'task-dock': '0e7dad96ce',
+            'theme': 'b0ec742409',
+            'ui': '8615d08d33',
+            'version': 'b1d28e9dff'
+        };
+        function url(f) {
+            // 自定义分支走 jsdelivr，那边自带缓存策略，不加查询串
+            if (base) return base + 'js/' + f + '.js';
+            return 'js/' + f + '.min.js?h=' + (GD_HASH[f] || '0');
+        }
+        // ★ CORE 已经在 head 里以静态 <script defer> 加载，这里不再
+        //   document.write 一遍。
+        //
+        //   自定义分支时才需要额外拉 CDN 那份。必须等 DOMContentLoaded 之后
+        //   —— 本地 defer 脚本在它之前执行，如果这里也用 document.write
+        //   同步插入，CDN 版本会先跑、然后被本地 defer 版反过来覆盖，
+        //   结果是"切了分支却还是旧代码"，且毫无报错。
+        if (base) {
+            window.addEventListener('DOMContentLoaded', function () {
+                var i = 0;
+                (function next() {
+                    if (i >= CORE.length) return;
+                    var s = document.createElement('script');
+                    s.src = url(CORE[i++]);
+                    s.onload = s.onerror = next;
+                    document.head.appendChild(s);
+                })();
+            });
+        }
+        window.__GD_DEFER__ = { files: DEFER, url: url };
+    })();
+    </script>
+    <!-- 统一<span data-i18n="btn.upload">Upload</span>弹窗 -->
+    <div id="upload-modal" class="modal-overlay hidden">
+        <div class="modal upload-modal">
+            <div class="modal-header">
+                <h3><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> <span data-i18n="btn.upload">Upload</span>文件</h3>
+                <button class="modal-close" onclick="ui.closeUploadModal()"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body">
+                <!-- 拖拽区域 -->
+                <div id="upload-drop-zone" class="upload-drop-zone">
+                    <div class="upload-drop-icon"><svg class="ico" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
+                    <p class="upload-drop-text"><span data-i18n="upload.dropHint">Drag files or folders here</span></p>
+                    <p class="upload-drop-hint"><span data-i18n="upload.multiHint">Supports multiple files and folders</span></p>
+                </div>
+                <!-- 选择按钮 -->
+                <div class="upload-actions">
+                    <button class="btn-primary" onclick="document.getElementById('upload-file-input').click()">
+                        <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> <span data-i18n="upload.selectFiles">Select Files</span>
+                    </button>
+                    <button class="btn-secondary" onclick="document.getElementById('upload-folder-input').click()">
+                        <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> <span data-i18n="upload.selectFolder">Select Folder</span>
+                    </button>
+                    <input type="file" id="upload-file-input" multiple style="display:none;">
+                    <input type="file" id="upload-folder-input" webkitdirectory multiple style="display:none;">
+                </div>
+                <!-- 已<span data-i18n="upload.selectFiles">Select Files</span>列表 -->
+                <div class="upload-file-list-header">
+                    <span><span data-i18n="upload.selected">Selected</span> <span id="upload-file-count">0</span> <span data-i18n="upload.items">items</span></span>
+                    <button class="icon-btn" onclick="ui.clearUploadFiles()" style="padding:2px 8px;"><span data-i18n="upload.clear">Clear</span></button>
+                </div>
+                <div id="upload-file-list" class="upload-file-list">
+                    <div class="upload-file-empty"><span data-i18n="upload.noFiles">No files selected</span></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="ui.closeUploadModal()"><span data-i18n="btn.cancel">Cancel</span></button>
+                <button class="btn-primary" id="upload-confirm-btn" onclick="ui.confirmUpload()" disabled>开始<span data-i18n="btn.upload">Upload</span></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 多选操作栏（移动端） -->
+    <div id="multi-select-bar" class="multi-select-bar">
+        <span id="multi-select-count" class="ms-count">0 项已选</span>
+        <div class="ms-actions">
+            <button class="ms-btn" onclick="ui.multiSelectAction('selectAll')">全选</button>
+            <button class="ms-btn" onclick="ui.multiSelectAction('move')"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> 移动</button>
+            <button class="ms-btn" onclick="ui.multiSelectAction('download')"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> <span data-i18n="menu.download">Download</span></button>
+            <button class="ms-btn" onclick="ui.multiSelectAction('delete')"><svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> <span data-i18n="menu.delete">Delete</span></button>
+            <button class="ms-btn ms-cancel" onclick="ui.exitMultiSelectMode()"><span data-i18n="btn.cancel">Cancel</span></button>
+        </div>
+    </div>
+
+    <!-- 移动端底部导航 -->
+    <div class="mobile-bottom-nav">
+        <div class="mobile-nav-items">
+            <div class="mobile-nav-item active" onclick="app.switchView('files')">
+                <span class="icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span><span>文件</span>
+            </div>
+            <div class="mobile-nav-item" onclick="app.switchView('recent')">
+                <span class="icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span><span>最近</span>
+            </div>
+            <div class="mobile-nav-item" onclick="app.switchView('favorites')">
+                <span class="icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span><span>收藏</span>
+            </div>
+            <div class="mobile-nav-item" onclick="ui.showTaskManager()">
+                <span class="icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></span><span>后台</span>
+                <span class="mobile-nav-badge" id="mobile-badge-tasks" style="display:none;"></span>
+            </div>
+            <div class="mobile-nav-item" onclick="ui.toggleMobileMenu()">
+                <span class="icon"><svg class="ico" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></span><span>更多</span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

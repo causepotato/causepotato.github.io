@@ -1,0 +1,915 @@
+/**
+ * 本地存储模块 v2
+ * 管理 Token、关联仓库、虚拟文件系统(VFS)、文件拆分关系、用户配置、仓库容量等
+ * 
+ * 虚拟文件系统结构：
+ * /drive_home/ - 根目录，所有用户可见的文件都在这里
+ *  - 文件：包含 chunks 数组，记录拆分后的分片在各仓库的实际位置
+ *  - 文件夹：纯虚拟概念，只存在于配置中
+ */
+class Storage {
+    constructor() {
+        this.prefix = 'github_drive_';
+        this.onConfigChange = null;
+        this.keys = {
+            TOKEN: 'token',
+            USER: 'user',
+            REPOS: 'repos',
+            VFS: 'vfs',           // 虚拟文件系统 { files: {}, folders: {} }
+            FAVORITES: 'favorites',
+            RECENT: 'recent',
+            SHARES: 'shares',
+            SETTINGS: 'settings',
+            REPO_USAGE: 'repo_usage',
+            STORAGE_CONFIG: 'storage_config',
+            ACCOUNTS: 'accounts',
+            CURRENT_ACCOUNT: 'current_account',
+        };
+        // 需要按账号隔离的数据 key
+        this.accountScopedKeys = [
+            this.keys.VFS,
+            this.keys.FAVORITES,
+            this.keys.RECENT,
+            this.keys.SHARES,
+            this.keys.REPOS,
+            this.keys.REPO_USAGE,
+            this.keys.STORAGE_CONFIG,
+            this.keys.SETTINGS,
+        ];
+        // 「当前是谁」—— 必须按标签页隔离，否则多标签页互相顶号
+        this.tabScopedKeys = [
+            this.keys.TOKEN,
+            this.keys.USER,
+            this.keys.CURRENT_ACCOUNT,
+        ];
+    }
+    
+    // ============ 标签页隔离（多标签页多账号的关键）============
+    //
+    // localStorage 是同源共享的：同一浏览器开两个标签页，它们读写的
+    // 是同一份数据。如果把「当前 token / 当前账号」存在这里，
+    // 标签页 B 一登录就会把 A 的身份覆盖掉 —— A 刷新后变成 B。
+    //   实测：A 登 Cool，B 登 Feng，回到 A 读到的已是 Feng。
+    //
+    // sessionStorage 则是「每标签页一份」（刷新保留，新标签页独立），
+    // 正好用来承载「本标签页当前是谁」。
+    //
+    // ACCOUNTS（账号列表）刻意仍放 localStorage —— 它是共享的备选名单，
+    // 两个标签页都能看到、都能切换，且不含任何"当前是谁"的含义。
+    _sessKey(key) { return this.prefix + 'tab_' + key; }
+    _sessGet(key) {
+        try { return sessionStorage.getItem(this._sessKey(key)); } catch { return null; }
+    }
+    _sessSet(key, raw) {
+        try { sessionStorage.setItem(this._sessKey(key), raw); } catch { /* 无痕模式等，忽略 */ }
+    }
+    _sessDel(key) {
+        try { sessionStorage.removeItem(this._sessKey(key)); } catch { /* 忽略 */ }
+    }
+    _isTabScoped(key) { return this.tabScopedKeys.includes(key); }
+
+    // 获取当前账号 ID（直接读底层存储，避免递归）
+    //
+    // 优先 sessionStorage（本标签页身份）；读不到才回退 localStorage，
+    // 那是 v85 之前的老数据，取到后顺手搬进 session 并清掉全局残留，
+    // 否则另一个标签页还会被同一份旧值"喂"成同一个账号。
+    _getAccountId() {
+        try {
+            const s = sessionStorage.getItem(this._sessKey(this.keys.CURRENT_ACCOUNT));
+            if (s) return JSON.parse(s);
+        } catch { /* 读不到继续回退 */ }
+        try {
+            const value = localStorage.getItem(this.prefix + this.keys.CURRENT_ACCOUNT);
+            if (value) {
+                this._sessSet(this.keys.CURRENT_ACCOUNT, value);
+                localStorage.removeItem(this.prefix + this.keys.CURRENT_ACCOUNT);
+                return JSON.parse(value);
+            }
+        } catch { /* 忽略 */ }
+        return null;
+    }
+    
+    // 获取带账号前缀的 key
+    _accountKey(key) {
+        if (this.accountScopedKeys.includes(key)) {
+            return 'account_' + (this._getAccountId() || 'default') + '_' + key;
+        }
+        return key;
+    }
+    
+    // 迁移旧数据到账号隔离的 key
+    //
+    // ★ 这里曾经是「A 账号的仓库被 B 账号继承」的源头。
+    //
+    //   旧写法：oldValue !== null && newValue === null 就复制。
+    //   旧 key 迁移后从不删除，所以这个条件对【每一个新账号】都成立 ——
+    //   A 登录一次之后，B、C、D 登录都会拿到 A 的 drive-storage-* 列表，
+    //   然后拿自己的 token 去写 A 的仓库 → 401 Bad credentials。
+    //   函数末尾那句注释原本写着「新账号从空数据开始」，和代码正好相反。
+    //
+    //   修法：迁移只发生一次，且只迁给【当时正在登录】的那个账号，
+    //   迁完立刻删掉旧 key，后面的账号一律从空开始。
+    _migrateToAccountScoped() {
+        const flagKey = this.prefix + '_scoped_migrated';
+        try {
+            if (localStorage.getItem(flagKey)) return;   // 已迁移过，不再迁
+        } catch { /* 读不到就当没迁过，继续 */ }
+
+        const accountId = this._getAccountId() || 'default';
+
+        this.accountScopedKeys.forEach(key => {
+            const oldKey = this.prefix + key;
+            const newKey = this.prefix + 'account_' + accountId + '_' + key;
+            const oldValue = localStorage.getItem(oldKey);
+            const newValue = localStorage.getItem(newKey);
+            if (oldValue !== null && newValue === null) {
+                localStorage.setItem(newKey, oldValue);
+            }
+            // 旧 key 必须清掉，否则下一个账号又会被喂同一份数据
+            localStorage.removeItem(oldKey);
+        });
+
+        try { localStorage.setItem(flagKey, '1'); } catch { /* 写不进就算了，下一轮再迁 */ }
+    }
+
+    get(key, defaultValue = null) {
+        // 「当前是谁」走标签页隔离层
+        if (this._isTabScoped(key)) {
+            const s = this._sessGet(key);
+            if (s !== null) {
+                try { return JSON.parse(s); } catch { return defaultValue; }
+            }
+            // 老数据回退（v85 之前存在 localStorage 全局）
+            const old = localStorage.getItem(this.prefix + key);
+            if (old !== null) {
+                this._sessSet(key, old);
+                localStorage.removeItem(this.prefix + key);   // 别再喂给别的标签页
+                try { return JSON.parse(old); } catch { return defaultValue; }
+            }
+            return defaultValue;
+        }
+        // 访问账号相关数据时执行迁移检查（幂等，不会重复迁移）
+        if (this.accountScopedKeys.includes(key)) {
+            try { this._migrateToAccountScoped(); } catch { /* 忽略 */ }
+        }
+        try { const value = localStorage.getItem(this.prefix + this._accountKey(key)); return value ? JSON.parse(value) : defaultValue; } catch { return defaultValue; }
+    }
+    set(key, value) {
+        const raw = JSON.stringify(value);
+        if (this._isTabScoped(key)) {
+            // 只写本标签页；同时清掉 localStorage 里的旧全局副本，
+            // 否则另一个标签页回退时会读到它，被"顶号"。
+            this._sessSet(key, raw);
+            try { localStorage.removeItem(this.prefix + key); } catch { /* 忽略 */ }
+        } else {
+            localStorage.setItem(this.prefix + this._accountKey(key), raw);
+        }
+        if (this.onConfigChange && key !== this.keys.TOKEN && key !== this.keys.USER) {
+            this.onConfigChange();
+        }
+    }
+    remove(key) {
+        if (this._isTabScoped(key)) {
+            this._sessDel(key);
+            try { localStorage.removeItem(this.prefix + key); } catch { /* 忽略 */ }
+        } else {
+            localStorage.removeItem(this.prefix + this._accountKey(key));
+        }
+        if (this.onConfigChange && key !== this.keys.TOKEN && key !== this.keys.USER) {
+            this.onConfigChange();
+        }
+    }
+    clearAll() { 
+        // 清理当前账号的数据
+        Object.values(this.keys).forEach(key => this.remove(key));
+        // 清理所有账号的隔离数据
+        const accountId = this._getAccountId();
+        this.accountScopedKeys.forEach(key => {
+            localStorage.removeItem(this.prefix + 'account_' + accountId + '_' + key);
+        });
+    }
+
+    // ==================== Token ====================
+    getToken() { return this.get(this.keys.TOKEN, ''); }
+    setToken(token) { this.set(this.keys.TOKEN, token); }
+    clearToken() { this.remove(this.keys.TOKEN); }
+
+    // ==================== 多账号管理 ====================
+    getAccounts() {
+        return this.get(this.keys.ACCOUNTS, []);
+    }
+    addAccount(token, user) {
+        const accounts = this.getAccounts();
+        const accountId = (user && (user.login || user.id)) || token.substring(0, 8);
+        const existing = accounts.find(a => a.id === accountId);
+        if (existing) {
+            existing.token = token;
+            existing.user = user;
+            existing.lastUsed = new Date().toISOString();
+        } else {
+            accounts.push({
+                id: accountId,
+                token: token,
+                user: user,
+                addedAt: new Date().toISOString(),
+                lastUsed: new Date().toISOString()
+            });
+        }
+        this.set(this.keys.ACCOUNTS, accounts);
+        this.set(this.keys.CURRENT_ACCOUNT, accountId);
+        return accountId;
+    }
+    removeAccount(accountId) {
+        let accounts = this.getAccounts().filter(a => a.id !== accountId);
+        this.set(this.keys.ACCOUNTS, accounts);
+        if (this.getCurrentAccountId() === accountId) {
+            this.set(this.keys.CURRENT_ACCOUNT, accounts[0] ? accounts[0].id : null);
+        }
+        return accounts;
+    }
+    getCurrentAccountId() {
+        return this.get(this.keys.CURRENT_ACCOUNT, null);
+    }
+    setCurrentAccount(accountId) {
+        this.set(this.keys.CURRENT_ACCOUNT, accountId);
+        const account = this.getAccounts().find(a => a.id === accountId);
+        if (account) {
+            this.setToken(account.token);
+            this.setUser(account.user);
+            account.lastUsed = new Date().toISOString();
+            const accounts = this.getAccounts();
+            const idx = accounts.findIndex(a => a.id === accountId);
+            if (idx >= 0) accounts[idx] = account;
+            this.set(this.keys.ACCOUNTS, accounts);
+        }
+        return account;
+    }
+    
+    // 清除指定账号的所有本地数据（VFS、收藏、最近使用、分享、仓库列表等）
+    //
+    // ★ 必须支持【指定账号】，不能只清"当前账号"。
+    //   切换账号的正确顺序是：先清"即将进入的目标账号"，再切过去。
+    //   旧实现只提供 clearCurrentAccountData()，于是调用方只能先清
+    //   （此时 identity 还是旧账号 A）再切换（切到 B）——清掉的是 A，
+    //   而 B 名下早已被历史迁移 bug 写入了 A 的仓库列表和 VFS，
+    //   那些脏数据一次都没被清过，于是"切了账号还是跨账号"。
+    clearAccountData(accountId) {
+        const id = accountId || this._getAccountId();
+        if (!id) return;
+
+        console.log(`[Storage] 清除账号 ${id} 的所有本地数据`);
+        this.accountScopedKeys.forEach(key => {
+            const accountKey = this.prefix + 'account_' + id + '_' + key;
+            localStorage.removeItem(accountKey);
+        });
+
+        // 同时清除全局的旧格式数据（如果有的话）
+        this.accountScopedKeys.forEach(key => {
+            const oldKey = this.prefix + key;
+            localStorage.removeItem(oldKey);
+        });
+
+        // 迁移标记也要清：它是全局的，留着会让下一次访问跳过迁移，
+        // 而旧格式的残留数据可能正躺在全局 key 里等着被喂给下一个账号。
+        try { localStorage.removeItem(this.prefix + '_scoped_migrated'); } catch (e) {}
+    }
+
+    // 兼容旧调用点：清除"当前账号"的数据
+    clearCurrentAccountData() {
+        this.clearAccountData(null);
+    }
+
+
+
+    // ==================== 分享密码（已移除） ====================
+    //
+    // 原实现有问题，已整体砍掉：
+    //   1. btoa() 是编码不是加密，逆向即可还原
+    //   2. 密码只存 localStorage —— 换设备就没了，链接在别的设备上打不开
+    //   3. 校验是纯前端的 —— 分享仓库本身是公开的，绕过校验即可拿到内容
+    // 结论：这个"密码"只防误点，不防真想看的人。留着反而给用户虚假的安全感。
+    //
+    // 分享本身就是"公开仓库 + Pages"，要给就给链接，别给密码。
+    //
+    // ★ 下面这个方法用于清理老用户 localStorage 里的历史遗留数据，
+    //   不要删 —— 否则旧数据会一直躺在用户浏览器里。
+    purgeLegacySharePasswords() {
+        if (this.get('share_passwords', null) !== null) {
+            this.remove('share_passwords');
+            return true;
+        }
+        return false;
+    }
+
+    // ==================== 文件标签系统 ====================
+    getFileTags(path) {
+        const tags = this.get('file_tags', {});
+        return tags[path] || [];
+    }
+    
+    setFileTags(path, tags) {
+        const allTags = this.get('file_tags', {});
+        if (tags.length === 0) {
+            delete allTags[path];
+        } else {
+            allTags[path] = tags;
+        }
+        this.set('file_tags', allTags);
+    }
+    
+    addFileTag(path, tag) {
+        const tags = this.getFileTags(path);
+        if (!tags.includes(tag)) {
+            tags.push(tag);
+            this.setFileTags(path, tags);
+        }
+    }
+    
+    removeFileTag(path, tag) {
+        const tags = this.getFileTags(path).filter(t => t !== tag);
+        this.setFileTags(path, tags);
+    }
+    
+    getAllTags() {
+        const allTags = this.get('file_tags', {});
+        const tagSet = new Set();
+        Object.values(allTags).forEach(tags => tags.forEach(t => tagSet.add(t)));
+        return Array.from(tagSet).sort();
+    }
+    
+    getFilesByTag(tag) {
+        const allTags = this.get('file_tags', {});
+        return Object.entries(allTags)
+            .filter(([path, tags]) => tags.includes(tag))
+            .map(([path]) => path);
+    }
+
+    // ==================== 用户信息 ====================
+    getUser() { return this.get(this.keys.USER, null); }
+    setUser(user) { this.set(this.keys.USER, user); }
+
+    // ==================== 关联仓库 ====================
+    getRepos() { return this.get(this.keys.REPOS, []); }
+    setRepos(repos) { this.set(this.keys.REPOS, repos); }
+    addRepo(repoInfo) {
+        const repos = this.getRepos();
+        const exists = repos.find(r => r.owner === repoInfo.owner && r.repo === repoInfo.repo);
+        if (!exists) {
+            repos.push({
+                owner: repoInfo.owner, repo: repoInfo.repo, name: repoInfo.name || repoInfo.repo,
+                description: repoInfo.description || '', branch: repoInfo.branch || 'main',
+                isDefault: repos.length === 0, addedAt: new Date().toISOString()
+            });
+            this.set(this.keys.REPOS, repos);
+        }
+        return repos;
+    }
+    removeRepo(owner, repo) {
+        let repos = this.getRepos().filter(r => !(r.owner === owner && r.repo === repo));
+        if (repos.length > 0 && !repos.find(r => r.isDefault)) repos[0].isDefault = true;
+        this.set(this.keys.REPOS, repos);
+        const usage = this.getRepoUsage();
+        delete usage[`${owner}/${repo}`];
+        this.set(this.keys.REPO_USAGE, usage);
+        return repos;
+    }
+    setDefaultRepo(owner, repo) {
+        const repos = this.getRepos();
+        repos.forEach(r => { r.isDefault = (r.owner === owner && r.repo === repo); });
+        this.set(this.keys.REPOS, repos);
+    }
+    getDefaultRepo() {
+        const repos = this.getRepos();
+        const currentUser = this.getUser()?.login;
+        // 只返回 owner 匹配的仓库
+        const validRepos = currentUser ? repos.filter(r => r.owner === currentUser) : repos;
+        return validRepos.find(r => r.isDefault) || validRepos[0] || null;
+    }
+    findRepo(owner, repo) { return this.getRepos().find(r => r.owner === owner && r.repo === repo); }
+
+    // ==================== 虚拟文件系统 (VFS) ====================
+    /**
+     * 获取完整 VFS 结构
+     * { files: { "/drive_home/xxx": {name, type, size, chunks, createdAt, updatedAt} }, 
+     *   folders: { "/drive_home/xxx": {name, type, createdAt} } }
+     */
+    getVFS() {
+        const vfs = this.get(this.keys.VFS, null);
+        // 规范化：确保始终返回 { files: {}, folders: {} } 结构，
+        // 避免旧版本同步进来的空对象/缺字段导致 Object.entries 崩溃
+        if (!vfs || typeof vfs !== 'object') return { files: {}, folders: {} };
+        if (!vfs.files || typeof vfs.files !== 'object') vfs.files = {};
+        if (!vfs.folders || typeof vfs.folders !== 'object') vfs.folders = {};
+        return vfs;
+    }
+    setVFS(vfs) { this.set(this.keys.VFS, vfs); }
+
+    /**
+     * 规范化虚拟路径，确保以 /drive_home/ 开头
+     */
+    static normalizePath(path) {
+        if (!path.startsWith('/drive_home')) {
+            path = '/drive_home/' + path.replace(/^\//, '');
+        }
+        return path.replace(/\/+$/, '') || '/drive_home';
+    }
+
+    /**
+     * 获取路径的父目录路径
+     */
+    static getParentPath(path) {
+        path = Storage.normalizePath(path);
+        const idx = path.lastIndexOf('/');
+        return idx <= '/drive_home'.length ? '/drive_home' : path.substring(0, idx);
+    }
+
+    /**
+     * 获取路径的文件名
+     */
+    static getFileName(path) {
+        path = Storage.normalizePath(path);
+        return path.substring(path.lastIndexOf('/') + 1);
+    }
+
+    /**
+     * 添加/更新文件到 VFS
+     * @param {string} virtualPath - 虚拟路径，如 /drive_home/文档/report.pdf
+     * @param {object} fileInfo - { name, size, chunks: [{owner, repo, path, size, sha}] }
+     */
+    putFile(virtualPath, fileInfo) {
+        virtualPath = Storage.normalizePath(virtualPath);
+        const vfs = this.getVFS();
+        const now = new Date().toISOString();
+        vfs.files[virtualPath] = {
+            name: fileInfo.name || Storage.getFileName(virtualPath),
+            type: 'file',
+            size: fileInfo.size || 0,
+            chunks: fileInfo.chunks || [],
+            createdAt: vfs.files[virtualPath]?.createdAt || now,
+            updatedAt: now
+        };
+        // 自动创建父文件夹
+        this._ensureParentFolders(virtualPath, vfs);
+        this.setVFS(vfs);
+        return vfs.files[virtualPath];
+    }
+
+    /**
+     * 添加文件夹到 VFS
+     */
+    putFolder(virtualPath) {
+        virtualPath = Storage.normalizePath(virtualPath);
+        const vfs = this.getVFS();
+        const now = new Date().toISOString();
+        vfs.folders[virtualPath] = {
+            name: Storage.getFileName(virtualPath),
+            type: 'folder',
+            createdAt: vfs.folders[virtualPath]?.createdAt || now
+        };
+        this._ensureParentFolders(virtualPath, vfs);
+        this.setVFS(vfs);
+        return vfs.folders[virtualPath];
+    }
+
+    /**
+     * 确保父文件夹存在（内部方法）
+     */
+    _ensureParentFolders(virtualPath, vfs) {
+        let parent = Storage.getParentPath(virtualPath);
+        while (parent && parent !== '/drive_home' && !vfs.folders[parent]) {
+            vfs.folders[parent] = {
+                name: Storage.getFileName(parent),
+                type: 'folder',
+                createdAt: new Date().toISOString()
+            };
+            parent = Storage.getParentPath(parent);
+        }
+    }
+
+    /**
+     * 获取文件信息
+     */
+    getFile(virtualPath) {
+        virtualPath = Storage.normalizePath(virtualPath);
+        return this.getVFS().files[virtualPath] || null;
+    }
+
+    /**
+     * 获取文件夹信息
+     */
+    getFolder(virtualPath) {
+        virtualPath = Storage.normalizePath(virtualPath);
+        return this.getVFS().folders[virtualPath] || null;
+    }
+
+    /**
+     * 判断路径是否存在（文件或文件夹）
+     */
+    exists(virtualPath) {
+        virtualPath = Storage.normalizePath(virtualPath);
+        const vfs = this.getVFS();
+        return !!vfs.files[virtualPath] || !!vfs.folders[virtualPath] || virtualPath === '/drive_home';
+    }
+
+    /**
+     * 列出指定目录下的内容
+     * @returns {Array} 文件和文件夹列表
+     */
+    listDirectory(virtualPath = '/drive_home') {
+        virtualPath = Storage.normalizePath(virtualPath);
+        const vfs = this.getVFS();
+        const prefix = virtualPath === '/drive_home' ? '/drive_home/' : virtualPath + '/';
+        const items = [];
+
+        // ★ .trash 是回收站的内部目录，不该出现在"全部文件"里。
+        //   但回收站视图要列它里面的东西 —— 所以只在"当前不在 .trash 里"时隐藏它。
+        //   （不按"名字以 . 开头"一刀切：用户自己的点开头目录不该被顺手藏掉。）
+        const insideTrash = virtualPath.split('/').includes('.trash');
+        const hidden = name => (!insideTrash && name === '.trash');
+
+        // 直接子文件
+        Object.entries(vfs.files).forEach(([path, info]) => {
+            if (path.startsWith(prefix) && !path.substring(prefix.length).includes('/')) {
+                if (hidden(info.name)) return;
+                items.push({ ...info, path, isFile: true });
+            }
+        });
+
+        // 直接子文件夹
+        Object.entries(vfs.folders).forEach(([path, info]) => {
+            if (path.startsWith(prefix) && !path.substring(prefix.length).includes('/')) {
+                if (hidden(info.name)) return;
+                items.push({ ...info, path, isFolder: true });
+            }
+        });
+
+        // 排序：文件夹在前，按名称排序
+        items.sort((a, b) => {
+            if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1;
+            return a.name.localeCompare(b.name);
+        });
+
+        return items;
+    }
+
+    /**
+     * 删除文件（同时删除所有分片的容量记录）
+     */
+    deleteFile(virtualPath) {
+        virtualPath = Storage.normalizePath(virtualPath);
+        const vfs = this.getVFS();
+        const file = vfs.files[virtualPath];
+        if (file) {
+            // 减少各仓库的容量使用
+            file.chunks.forEach(chunk => {
+                this.subtractFromRepoUsage(chunk.owner, chunk.repo, chunk.size);
+            });
+            delete vfs.files[virtualPath];
+            this.setVFS(vfs);
+        }
+        return !!file;
+    }
+
+    /**
+     * 删除文件夹（递归删除所有子文件和子文件夹）
+     */
+    deleteFolder(virtualPath) {
+        virtualPath = Storage.normalizePath(virtualPath);
+        if (virtualPath === '/drive_home') return false;
+        const vfs = this.getVFS();
+        const prefix = virtualPath + '/';
+        let deleted = false;
+
+        // 删除所有子文件
+        Object.keys(vfs.files).forEach(path => {
+            if (path.startsWith(prefix) || path === virtualPath) {
+                const file = vfs.files[path];
+                if (file) {
+                    file.chunks.forEach(chunk => {
+                        this.subtractFromRepoUsage(chunk.owner, chunk.repo, chunk.size);
+                    });
+                }
+                delete vfs.files[path];
+                deleted = true;
+            }
+        });
+
+        // 删除所有子文件夹
+        Object.keys(vfs.folders).forEach(path => {
+            if (path.startsWith(prefix) || path === virtualPath) {
+                delete vfs.folders[path];
+                deleted = true;
+            }
+        });
+
+        if (deleted) this.setVFS(vfs);
+        return deleted;
+    }
+
+    /**
+     * 重命名/移动文件或文件夹
+     */
+    moveItem(oldPath, newPath) {
+        oldPath = Storage.normalizePath(oldPath);
+        newPath = Storage.normalizePath(newPath);
+        const vfs = this.getVFS();
+
+        if (vfs.files[oldPath]) {
+            vfs.files[newPath] = { ...vfs.files[oldPath], name: Storage.getFileName(newPath), updatedAt: new Date().toISOString() };
+            delete vfs.files[oldPath];
+            this._ensureParentFolders(newPath, vfs);
+        } else if (vfs.folders[oldPath]) {
+            // 移动文件夹：需要更新所有子项的路径
+            const oldPrefix = oldPath + '/';
+            const newPrefix = newPath + '/';
+            const newFiles = {};
+            const newFolders = {};
+            Object.entries(vfs.files).forEach(([path, info]) => {
+                if (path === oldPath) {
+                    newFiles[newPath] = { ...info, name: Storage.getFileName(newPath) };
+                } else if (path.startsWith(oldPrefix)) {
+                    newFiles[newPrefix + path.substring(oldPrefix.length)] = info;
+                } else {
+                    newFiles[path] = info;
+                }
+            });
+            Object.entries(vfs.folders).forEach(([path, info]) => {
+                if (path === oldPath) {
+                    newFolders[newPath] = { ...info, name: Storage.getFileName(newPath) };
+                } else if (path.startsWith(oldPrefix)) {
+                    newFolders[newPrefix + path.substring(oldPrefix.length)] = info;
+                } else {
+                    newFolders[path] = info;
+                }
+            });
+            vfs.files = newFiles;
+            vfs.folders = newFolders;
+            this._ensureParentFolders(newPath, vfs);
+        } else {
+            return false;
+        }
+
+        this.setVFS(vfs);
+        return true;
+    }
+
+    /**
+     * 搜索文件
+     */
+    searchFiles(query, searchContent = false) {
+        query = query.toLowerCase();
+        const vfs = this.getVFS();
+        const results = [];
+        const textExts = ['.txt', '.md', '.json', '.js', '.py', '.html', '.css', '.csv', '.xml', '.yml', '.yaml', '.json', '.log'];
+        
+        Object.entries(vfs.files).forEach(([path, info]) => {
+            let matched = false;
+            let matchPreview = '';
+            
+            // 文件名匹配
+            if (info.name.toLowerCase().includes(query)) {
+                matched = true;
+            }
+            
+            // 内容匹配（仅文本文件）
+            if (searchContent && !matched) {
+                const ext = '.' + (info.name.split('.').pop() || '').toLowerCase();
+                if (textExts.includes(ext) && info.content) {
+                    const content = typeof info.content === 'string' ? info.content : '';
+                    const idx = content.toLowerCase().indexOf(query);
+                    if (idx >= 0) {
+                        matched = true;
+                        const start = Math.max(0, idx - 20);
+                        const end = Math.min(content.length, idx + query.length + 40);
+                        matchPreview = '...' + content.substring(start, end) + '...';
+                    }
+                }
+            }
+            
+            if (matched) {
+                results.push({ ...info, path, isFile: true, matchPreview, contentMatch: !!matchPreview });
+            }
+        });
+        return results;
+    }
+
+    // ==================== 收藏 ====================
+    getFavorites() { return this.get(this.keys.FAVORITES, []); }
+    toggleFavorite(virtualPath) {
+        virtualPath = Storage.normalizePath(virtualPath);
+        const favorites = this.getFavorites();
+        const idx = favorites.indexOf(virtualPath);
+        if (idx >= 0) favorites.splice(idx, 1); else favorites.push(virtualPath);
+        this.set(this.keys.FAVORITES, favorites);
+        return idx < 0;
+    }
+    isFavorite(virtualPath) { return this.getFavorites().includes(Storage.normalizePath(virtualPath)); }
+
+
+    // 检查文件夹是否存在
+    folderExists(path) {
+        const vfs = this.getVFS();
+        return !!vfs.folders[path];
+    }
+
+    // ==================== 最近使用 ====================
+    getRecent() { return this.get(this.keys.RECENT, []); }
+    addToRecent(virtualPath) {
+        virtualPath = Storage.normalizePath(virtualPath);
+        let recent = this.getRecent();
+        recent = recent.filter(p => p !== virtualPath);
+        recent.unshift(virtualPath);
+        recent = recent.slice(0, 50);
+        this.set(this.keys.RECENT, recent);
+    }
+
+    // ==================== 分享记录 ====================
+    getShares() { return this.get(this.keys.SHARES, []); }
+    addShare(shareInfo) {
+        const shares = this.getShares();
+        shares.unshift({ id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5), ...shareInfo, createdAt: new Date().toISOString() });
+        this.set(this.keys.SHARES, shares);
+        return shares[0];
+    }
+    removeShare(id) {
+        const shares = this.getShares().filter(s => s.id !== id);
+        this.set(this.keys.SHARES, shares);
+    }
+
+    // ==================== 设置 ====================
+    getSettings() {
+        return this.get(this.keys.SETTINGS, {
+            viewMode: 'grid', sortBy: 'name', sortOrder: 'asc', showHidden: false, confirmDelete: true
+        });
+    }
+    updateSettings(updates) {
+        const settings = this.getSettings();
+        this.set(this.keys.SETTINGS, { ...settings, ...updates });
+    }
+
+    // ==================== 存储配置（智能分配+文件拆分） ====================
+    /**
+     * 获取存储配置
+     * maxRepoSize: 单仓库最大容量（字节），默认 900MB
+     * autoCreateRepo: 容量不足时是否自动创建新仓库
+     * repoNamePrefix: 自动创建仓库的名称前缀
+     * warnThreshold: 容量警告阈值（0-1），默认 0.8
+     *
+     * ── 分片参数（v45 起语义变了，实测详见 COOL-DOC 的传输性能页）──
+     * maxConcurrency: 并发硬上限，默认 16（实测 24 已劣化）
+     * memoryBudget:   同时编码的字节预算，默认 512MB（决定并发数上限）
+     * chunkSize:     单片**上限**，默认 32MB（旧版是"切分阈值"，语义已废）
+     * minChunkSize:  单片**下限**，默认 1MB
+     * directMaxSize: ≤ 此值走 contents API 直传不切分，默认 1MB
+     *
+     * 为什么改成动态计算：实测发现每片都有 1~2 秒固定开销（HTTPS 握手 +
+     * API 往返），而 commit 固定约 5.7 秒、与文件数无关。所以最优解是
+     * 「片数 ≈ 并发数、单片尽量大、所有片挤进一次 tree + commit」。
+     * 旧的 512KB 固定分片传 1GB 要切 2048 片，实测 16MB 文件就慢 5.2 倍。
+     */
+    getConfig() { return this.getStorageConfig(); }
+    getStorageConfig() {
+        const defaults = {
+            maxRepoSize: 900 * 1024 * 1024,
+            autoCreateRepo: true,
+            repoNamePrefix: 'drive-storage',
+            warnThreshold: 0.8,
+            // 分片：上限 32MB（blob 实测上限 ~38MB，留 6MB 余量），
+            // 下限 1MB，≤1MB 直传，并发 4
+            chunkSize: 32 * 1024 * 1024,
+            minChunkSize: 1 * 1024 * 1024,
+            directMaxSize: 1 * 1024 * 1024,
+            maxConcurrency: 16,
+            memoryBudget: 512 * 1024 * 1024,
+            configVersion: 3,
+            // 自动整理：**默认开启**（v0.0.64）。
+            //
+            //   v0.0.63 关掉是因为算法错了：旧算法"按整个仓装箱"，
+            //   大仓剩 94MB 装不下小仓 124MB，就直接放弃 ——
+            //   结果仓没少几个，大仓还填不满，等于白跑一趟还倒腾数据。
+            //
+            //   v0.0.64 改成"按分片装箱、把仓填满"后，效果是实打实的：
+            //     3 个仓 → 2 个，大仓 806MB 被填到 900MB，迁移仅 94MB。
+            //   所以重新打开。
+            //
+            //   空仓删掉会少一份额度，但空仓随时能自动重建，代价很小。
+            autoCompact: true,
+            // ★ 默认**不删仓**。删仓库不可逆，而腾出的那点额度随时能靠
+            //   新建空仓拿回来，收益远小于风险。想要自动删的用户自己在
+            //   设置里打开（那条已经标了"不可恢复"）。
+            //   这里原先写 true，和 app.js「自动整理默认不删仓库」的注释相反
+            //   —— 注释说一套、代码做一套，是最容易出事的一类不一致。
+            autoCompactDelete: false,
+            autoCompactMaxMoveMB: 300,
+            autoCompactCooldownHours: 24,
+            lastAutoCompactAt: 0
+        };
+        const saved = this.get(this.keys.STORAGE_CONFIG, null);
+        if (!saved) return defaults;
+        
+        // 配置迁移：v3 起 chunkSize 从"切分阈值"变成"单片上限"。
+        // 旧值（含 512KB）全部归一到 32MB —— 沿用旧值会让 1GB 切成 2048 片，
+        // 每片付一遍固定开销，实测慢 5 倍以上。
+        let needUpdate = false;
+        const LEGACY_CHUNK = [
+            50 * 1024 * 1024, 20 * 1024 * 1024, 10 * 1024 * 1024,
+            5 * 1024 * 1024, 512 * 1024
+        ];
+        if (LEGACY_CHUNK.includes(saved.chunkSize)) {
+            saved.chunkSize = defaults.chunkSize;
+            needUpdate = true;
+        }
+        if (LEGACY_CHUNK.includes(saved.minChunkSize)) {
+            saved.minChunkSize = defaults.minChunkSize;
+            needUpdate = true;
+        }
+        if (saved.configVersion !== defaults.configVersion) {
+            saved.configVersion = defaults.configVersion;
+            needUpdate = true;
+        }
+        // 确保所有字段都存在
+        for (const key of Object.keys(defaults)) {
+            if (saved[key] === undefined) {
+                saved[key] = defaults[key];
+                needUpdate = true;
+            }
+        }
+        if (needUpdate) {
+            this.set(this.keys.STORAGE_CONFIG, saved);
+        }
+        return saved;
+    }
+    updateStorageConfig(updates) {
+        const config = this.getStorageConfig();
+        this.set(this.keys.STORAGE_CONFIG, { ...config, ...updates });
+    }
+
+    // ==================== 仓库容量使用量追踪 ====================
+    getRepoUsage() { return this.get(this.keys.REPO_USAGE, {}); }
+    setRepoUsage(owner, repo, sizeBytes) {
+        const usage = this.getRepoUsage();
+        usage[`${owner}/${repo}`] = { size: sizeBytes, updatedAt: new Date().toISOString() };
+        this.set(this.keys.REPO_USAGE, usage);
+    }
+    addToRepoUsage(owner, repo, sizeBytes) {
+        const usage = this.getRepoUsage();
+        const key = `${owner}/${repo}`;
+        if (!usage[key]) usage[key] = { size: 0, updatedAt: new Date().toISOString() };
+        usage[key].size += sizeBytes;
+        usage[key].updatedAt = new Date().toISOString();
+        this.set(this.keys.REPO_USAGE, usage);
+    }
+    subtractFromRepoUsage(owner, repo, sizeBytes) {
+        const usage = this.getRepoUsage();
+        const key = `${owner}/${repo}`;
+        if (usage[key]) {
+            usage[key].size = Math.max(0, usage[key].size - sizeBytes);
+            usage[key].updatedAt = new Date().toISOString();
+            this.set(this.keys.REPO_USAGE, usage);
+        }
+    }
+    getRepoUsageSize(owner, repo) {
+        const usage = this.getRepoUsage();
+        return usage[`${owner}/${repo}`]?.size || 0;
+    }
+    getRepoRemaining(owner, repo) {
+        const config = this.getStorageConfig();
+        const used = this.getRepoUsageSize(owner, repo);
+        return Math.max(0, config.maxRepoSize - used);
+    }
+    canRepoFit(owner, repo, fileSize) {
+        return this.getRepoRemaining(owner, repo) >= fileSize;
+    }
+    getRepoUsagePercent(owner, repo) {
+        const config = this.getStorageConfig();
+        const used = this.getRepoUsageSize(owner, repo);
+        return Math.min(1, used / config.maxRepoSize);
+    }
+
+    // ==================== 数据导入导出（配置同步用） ====================
+    exportData() {
+        const data = {};
+        Object.values(this.keys).forEach(key => {
+            if (key !== this.keys.TOKEN && key !== this.keys.USER && key !== this.keys.ACCOUNTS && key !== this.keys.CURRENT_ACCOUNT) {
+                data[key] = this.get(key);
+            }
+        });
+        return data;
+    }
+    importData(data) {
+        Object.entries(data).forEach(([key, value]) => {
+            if (value !== null && value !== undefined && key !== this.keys.TOKEN && key !== this.keys.USER) {
+                this.set(key, value);
+            }
+        });
+    }
+
+    // ==================== 工具方法 ====================
+    static formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+}
